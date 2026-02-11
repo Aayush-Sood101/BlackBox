@@ -1,0 +1,30 @@
+# Sandbox container for executing Windows .exe files
+FROM alpine:3.19
+
+# Install Wine and minimal dependencies
+RUN apk add --no-cache \
+    wine \
+    && rm -rf /var/cache/apk/* \
+    && rm -rf /tmp/*
+
+# Create non-root user for sandbox execution
+RUN addgroup -S sandbox && adduser -S sandbox -G sandbox -h /home/sandbox -s /sbin/nologin
+
+# Setup Wine prefix
+ENV WINEARCH=win32
+ENV WINEPREFIX=/home/sandbox/.wine
+ENV WINEDEBUG=-all
+
+# Create sandbox directory
+WORKDIR /sandbox
+RUN mkdir -p /sandbox && chown -R sandbox:sandbox /sandbox
+RUN mkdir -p /home/sandbox/.wine && chown -R sandbox:sandbox /home/sandbox
+
+# Switch to non-root user
+USER sandbox
+
+# Initialize Wine prefix (reduces startup time later)
+RUN wine wineboot --init 2>/dev/null || true
+
+# Default command
+CMD ["/bin/sh"]
