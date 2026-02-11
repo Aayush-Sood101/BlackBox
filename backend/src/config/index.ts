@@ -13,7 +13,8 @@ export const config = {
   
   docker: {
     sandboxImage: process.env.SANDBOX_IMAGE || 'sandbox:latest',
-    timeout: parseInt(process.env.DOCKER_TIMEOUT || '5000', 10),
+    // Wine on Apple Silicon (emulated x86_64) needs more time to start
+    timeout: parseInt(process.env.DOCKER_TIMEOUT || '30000', 10),
     memoryLimit: parseInt(process.env.DOCKER_MEMORY_LIMIT || '268435456', 10),
   },
   

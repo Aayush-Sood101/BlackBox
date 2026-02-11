@@ -2,12 +2,15 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import http from 'http';
 import { config } from './config';
 import { logger } from './utils/logger';
 import apiRoutes from './routes/api';
 import { checkDockerHealth } from './services/dockerService';
+import { initializeWebSocket, closeAllConnections, getConnectedClientCount } from './services/websocketService';
 
 const app = express();
+const server = http.createServer(app);
 
 // Middleware
 app.use(cors({
@@ -77,11 +80,29 @@ async function startServer() {
     logger.warn('Running in limited mode - only mock endpoints will work');
   }
 
-  app.listen(config.port, () => {
+  // Initialize WebSocket server
+  initializeWebSocket(server);
+
+  server.listen(config.port, () => {
     logger.info(`Server started on port ${config.port}`);
     logger.info(`Environment: ${config.nodeEnv}`);
-    logger.info(`API available at http://localhost:${config.port}`);
+    logger.info(`HTTP API available at http://localhost:${config.port}`);
+    logger.info(`WebSocket available at ws://localhost:${config.port}/ws`);
   });
+
+  // Graceful shutdown
+  const shutdown = () => {
+    logger.info('Shutting down gracefully...');
+    logger.info(`Closing ${getConnectedClientCount()} WebSocket connections`);
+    closeAllConnections();
+    server.close(() => {
+      logger.info('Server closed');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 startServer().catch((error) => {

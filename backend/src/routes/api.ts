@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import path from 'path';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { checkDockerHealth, ensureSandboxImage } from '../services/dockerService';
@@ -14,6 +13,49 @@ import {
 
 const router = Router();
 
+/**
+ * Detect the type of executable from magic bytes and return validation info
+ */
+function validateExecutable(buffer: Buffer): { valid: boolean; type: string; message: string } {
+  if (buffer.length < 4) {
+    return { valid: false, type: 'unknown', message: 'File too small to be an executable' };
+  }
+
+  // Windows PE: MZ magic (0x4D 0x5A)
+  if (buffer[0] === 0x4D && buffer[1] === 0x5A) {
+    return { valid: true, type: 'windows-pe', message: 'Valid Windows PE executable' };
+  }
+
+  // macOS Mach-O: Various magic values
+  if (
+    (buffer[0] === 0xCF && buffer[1] === 0xFA && buffer[2] === 0xED && buffer[3] === 0xFE) ||
+    (buffer[0] === 0xCE && buffer[1] === 0xFA && buffer[2] === 0xED && buffer[3] === 0xFE) ||
+    (buffer[0] === 0xCA && buffer[1] === 0xFE && buffer[2] === 0xBA && buffer[3] === 0xBE) ||
+    (buffer[0] === 0xBE && buffer[1] === 0xBA && buffer[2] === 0xFE && buffer[3] === 0xCA)
+  ) {
+    return { 
+      valid: false, 
+      type: 'macos-macho', 
+      message: 'This is a macOS executable (Mach-O). Please compile your code for Windows using MinGW (x86_64-w64-mingw32-g++) or compile on a Windows machine.' 
+    };
+  }
+
+  // Linux ELF: 0x7F 'E' 'L' 'F'
+  if (buffer[0] === 0x7F && buffer[1] === 0x45 && buffer[2] === 0x4C && buffer[3] === 0x46) {
+    return { 
+      valid: false, 
+      type: 'linux-elf', 
+      message: 'This is a Linux executable (ELF). Please compile your code for Windows using MinGW.' 
+    };
+  }
+
+  return { 
+    valid: false, 
+    type: 'unknown', 
+    message: `Unrecognized file format (magic bytes: ${buffer.slice(0, 4).toString('hex')}). Please upload a Windows .exe file.` 
+  };
+}
+
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -21,13 +63,8 @@ const upload = multer({
   limits: {
     fileSize: config.upload.maxFileSize,
   },
-  fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (ext !== '.exe') {
-      return cb(new Error('Only .exe files are allowed'));
-    }
-    cb(null, true);
-  },
+  // Accept all files - validation is done after upload by checking PE header
+  // This handles macOS which often hides/strips .exe extensions
 });
 
 /**
@@ -55,9 +92,30 @@ router.post(
   upload.single('executable'),
   async (req: Request, res: Response): Promise<void> => {
     try {
-      // Validate file
+      // Validate file exists
       if (!req.file) {
         res.status(400).json({ error: 'No executable file uploaded' });
+        return;
+      }
+
+      // Log file details for debugging
+      logger.info('File upload received', {
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        firstBytes: req.file.buffer?.slice(0, 10).toString('hex'),
+      });
+
+      // Validate file is a Windows PE executable (check magic bytes)
+      // This is more reliable than checking extension, especially on macOS
+      const validation = validateExecutable(req.file.buffer);
+      if (!validation.valid) {
+        logger.warn('Executable validation failed', {
+          type: validation.type,
+          message: validation.message,
+          filename: req.file.originalname,
+        });
+        res.status(400).json({ error: validation.message });
         return;
       }
 

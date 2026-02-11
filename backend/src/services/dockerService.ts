@@ -72,11 +72,18 @@ function parseDockerLogs(logs: Buffer): { stdout: string; stderr: string } {
   let stderr = '';
   let offset = 0;
 
-  while (offset < logs.length - 8) {
+  // Docker multiplexed stream format: [STREAM_TYPE(1), 0, 0, 0, SIZE(4), DATA(SIZE)]
+  while (offset + 8 <= logs.length) {
     const streamType = logs[offset];
     const size = logs.readUInt32BE(offset + 4);
 
-    if (offset + 8 + size > logs.length) break;
+    // Validate we have enough data
+    if (offset + 8 + size > logs.length) {
+      // Try to read whatever remains
+      const remaining = logs.slice(offset + 8).toString('utf8');
+      stdout += remaining;
+      break;
+    }
 
     const chunk = logs.slice(offset + 8, offset + 8 + size).toString('utf8');
     
@@ -84,14 +91,21 @@ function parseDockerLogs(logs: Buffer): { stdout: string; stderr: string } {
       stdout += chunk;
     } else if (streamType === 2) {
       stderr += chunk;
+    } else {
+      // Unknown stream type - might be raw text
+      stdout += chunk;
     }
 
     offset += 8 + size;
   }
 
-  // Fallback for non-multiplexed logs
-  if (!stdout && !stderr) {
-    stdout = logs.toString('utf8');
+  // Fallback for non-multiplexed logs (TTY mode or raw output)
+  if (!stdout && !stderr && logs.length > 0) {
+    const text = logs.toString('utf8');
+    // Check if it looks like multiplexed (starts with stream byte 0, 1, or 2)
+    if (logs[0] > 2 || !text.includes('\x00')) {
+      stdout = text;
+    }
   }
 
   return { stdout, stderr };
@@ -115,12 +129,17 @@ export async function executeInSandbox(
   let timedOut = false;
 
   try {
-    // Write input to file
-    const jobDir = path.dirname(executablePath);
+    // Write input to file - must use absolute path for Docker volume mount
+    const jobDir = path.resolve(path.dirname(executablePath));
     const inputPath = path.join(jobDir, 'input.txt');
     await fs.writeFile(inputPath, input);
     
-    logger.debug(`Creating container ${containerName}`);
+    logger.info(`Docker execution setup`, {
+      containerName,
+      jobDir,
+      inputPreview: input.substring(0, 100),
+      executablePath
+    });
 
     // Create container with security constraints
     container = await docker.createContainer({
@@ -128,13 +147,19 @@ export async function executeInSandbox(
       name: containerName,
       Cmd: [
         '/bin/sh', '-c',
-        `cd /sandbox && timeout ${Math.ceil(timeout / 1000)}s wine program.exe < input.txt 2>&1 || echo "[EXIT:$?]"`
+        // Run wine with timeout, capture exit code
+        `cd /sandbox && timeout ${Math.ceil(timeout / 1000)}s wine program.exe < input.txt; EC=$?; if [ $EC -eq 124 ]; then echo "[TIMEOUT]"; fi; exit $EC`
       ],
       WorkingDir: '/sandbox',
       Env: [
         'WINEDEBUG=-all',
         'DISPLAY=',
       ],
+      // Ensure stdout/stderr are captured
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: false,
+      OpenStdin: false,
       HostConfig: {
         // Memory limit
         Memory: memoryLimit,

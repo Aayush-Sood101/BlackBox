@@ -12,34 +12,48 @@ interface FileUploadProps {
 
 export function FileUpload({ onFileSelect, selectedFile, disabled }: FileUploadProps) {
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: FileRejection[]) => {
     setError(null);
+    setWarning(null);
     
-    if (rejectedFiles.length > 0) {
+    // Get file from either accepted or rejected arrays
+    // On macOS, .exe files may end up in either due to MIME type issues
+    let file: File | undefined = acceptedFiles[0];
+    
+    // If not in accepted, check rejected files
+    if (!file && rejectedFiles.length > 0) {
       const rejection = rejectedFiles[0];
-      if (rejection.errors[0]?.code === 'file-invalid-type') {
-        setError('Only .exe files are allowed');
-      } else if (rejection.errors[0]?.code === 'file-too-large') {
+      // If rejected only for size, show size error
+      if (rejection.errors.some(e => e.code === 'file-too-large')) {
         setError('File is too large (max 10MB)');
-      } else {
-        setError('Invalid file');
+        return;
       }
-      return;
+      // Otherwise, get the file and validate manually
+      file = rejection.file;
     }
-
-    if (acceptedFiles.length > 0) {
-      onFileSelect(acceptedFiles[0]);
+    
+    if (!file) return;
+    
+    // On macOS, Finder often hides/strips file extensions
+    // Accept any file but warn if no .exe extension
+    // Backend will validate actual file content (PE header)
+    const hasExeExtension = file.name.toLowerCase().endsWith('.exe');
+    
+    if (!hasExeExtension) {
+      // Show warning but still allow the file (macOS may have hidden the extension)
+      setWarning('File has no .exe extension. Make sure this is a Windows executable.');
     }
+    
+    onFileSelect(file);
   }, [onFileSelect]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      'application/x-msdownload': ['.exe'],
-      'application/x-msdos-program': ['.exe'],
-      'application/octet-stream': ['.exe'],
-    },
+    // Accept all files - macOS doesn't recognize Windows .exe MIME types
+    // and may strip extensions. Backend validates actual file content.
+    accept: undefined,
     maxSize: 10 * 1024 * 1024, // 10MB
     multiple: false,
     disabled,
@@ -48,6 +62,7 @@ export function FileUpload({ onFileSelect, selectedFile, disabled }: FileUploadP
   const removeFile = () => {
     onFileSelect(null);
     setError(null);
+    setWarning(null);
   };
 
   return (
@@ -108,6 +123,13 @@ export function FileUpload({ onFileSelect, selectedFile, disabled }: FileUploadP
         <div className="flex items-center gap-2 mt-2 text-red-600 dark:text-red-400">
           <AlertCircle className="w-4 h-4" />
           <span className="text-sm">{error}</span>
+        </div>
+      )}
+
+      {warning && !error && (
+        <div className="flex items-center gap-2 mt-2 text-amber-600 dark:text-amber-400">
+          <AlertCircle className="w-4 h-4" />
+          <span className="text-sm">{warning}</span>
         </div>
       )}
     </div>
